@@ -1,0 +1,28 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.8
+    commands:
+      - pip install boto3 sagemaker
+  
+  pre_build:
+    commands:
+      - echo "Preparing for model deployment"
+      - MODEL_DATA_URL="s3://${MODEL_BUCKET}/model/model.pkl"
+      - MODEL_NAME="ml-model-$(date +%Y-%m-%d-%H-%M-%S)"
+  
+  build:
+    commands:
+      - echo "Deploying model to SageMaker endpoint"
+      - python deploy/endpoint_config.py --model-data-url $MODEL_DATA_URL --model-name $MODEL_NAME --role-arn ${SAGEMAKER_ROLE_ARN} --instance-type ml.m5.large
+  
+  post_build:
+    commands:
+      - echo "Deployment initiated on `date`"
+      - echo "Endpoint creation in progress. Check AWS SageMaker console for status."
+
+artifacts:
+  files:
+    - endpoint_info.json

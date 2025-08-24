@@ -1,0 +1,26 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.8
+    commands:
+      - pip install pandas scikit-learn boto3
+  
+  build:
+    commands:
+      - echo "Starting data preprocessing"
+      - aws s3 cp s3://${INPUT_BUCKET}/raw_data.csv /tmp/raw_data.csv
+      - mkdir -p /tmp/input_data /tmp/output_data
+      - cp /tmp/raw_data.csv /tmp/input_data/raw_data.csv
+      - python data/preprocessing/preprocess.py --input-data-path /tmp/input_data --output-data-path /tmp/output_data
+      - aws s3 cp --recursive /tmp/output_data/ s3://${OUTPUT_BUCKET}/processed_data/
+  
+  post_build:
+    commands:
+      - echo "Preprocessing completed on `date`"
+
+artifacts:
+  files:
+    - appspec.yml
+    - data/**/*

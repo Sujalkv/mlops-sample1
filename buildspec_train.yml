@@ -1,0 +1,60 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.8
+    commands:
+      - pip install pandas scikit-learn boto3 sagemaker
+  
+  pre_build:
+    commands:
+      - echo "Setting up SageMaker training job"
+      - mkdir -p /tmp/model /tmp/data
+  
+  build:
+    commands:
+      - echo "Starting model training"
+      - aws s3 cp --recursive s3://${DATA_BUCKET}/processed_data/ /tmp/data/ || aws s3 cp s3://${DATA_BUCKET}/raw_data.csv /tmp/data/
+      - python model/train.py --train-data-path /tmp/data --validation-data-path /tmp/data --model-dir /tmp/model
+      - aws s3 cp --recursive /tmp/model/ s3://${MODEL_BUCKET}/model/
+      - python model/evaluate.py --model-path /tmp/model/model.pkl --test-data-path /tmp/data --output-dir /tmp/model
+      - aws s3 cp /tmp/model/evaluation.json s3://${MODEL_BUCKET}/evaluation/evaluation.json
+  
+  post_build:
+    commands:
+      - echo "Training completed on `date`"
+      - |
+        # Use Python to check metrics instead of jq and bc
+        python -c '
+        import json
+        import os
+        import sys
+        
+        metrics_file = "/tmp/model/metrics.json"
+        if os.path.exists(metrics_file):
+            print("Metrics file found")
+            with open(metrics_file, "r") as f:
+                try:
+                    metrics = json.load(f)
+                    accuracy = metrics.get("accuracy", 0)
+                    print(f"Extracted accuracy: {accuracy}")
+                    if accuracy > 0.8:
+                        print("Model accuracy meets threshold, proceeding with registration")
+                        os.system("aws sagemaker create-model-package-group --model-package-group-name my-model-package-group --model-package-group-description \"My model package group\" || true")
+                    else:
+                        print("Model accuracy below threshold, but continuing pipeline")
+                except json.JSONDecodeError:
+                    print("Error parsing metrics.json")
+                    print(open(metrics_file).read())
+        else:
+            print("Metrics file not found at /tmp/model/metrics.json")
+            os.system("ls -la /tmp/model/")
+        '
+      - exit 0
+
+artifacts:
+  files:
+    - model/**/*
+    - /tmp/model/metrics.json
+    - /tmp/model/evaluation.json
