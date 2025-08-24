@@ -1,0 +1,228 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'MLOps Pipeline with AWS CodePipeline and SageMaker'
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: GitHub repository owner
+  
+  GitHubRepo:
+    Type: String
+    Description: GitHub repository name
+  
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: GitHub repository branch
+  
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: GitHub OAuth token
+
+Resources:
+  # S3 Buckets
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${AWS::StackName}-data-${AWS::AccountId}
+      VersioningConfiguration:
+        Status: Enabled
+
+  ModelBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${AWS::StackName}-model-${AWS::AccountId}
+      VersioningConfiguration:
+        Status: Enabled
+
+  # IAM Roles
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AWSCodeBuildAdminAccess
+
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+  # CodeBuild Projects
+  PreprocessProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-preprocess
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: INPUT_BUCKET
+            Value: !Ref DataBucket
+          - Name: OUTPUT_BUCKET
+            Value: !Ref DataBucket
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec_preprocess.yml
+
+  TrainProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-train
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: DATA_BUCKET
+            Value: !Ref DataBucket
+          - Name: MODEL_BUCKET
+            Value: !Ref ModelBucket
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec_train.yml
+
+  DeployProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-deploy
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: MODEL_BUCKET
+            Value: !Ref ModelBucket
+          - Name: SAGEMAKER_ROLE_ARN
+            Value: !GetAtt SageMakerExecutionRole.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec_deploy.yml
+
+  # CodePipeline
+  MLOpsPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${AWS::StackName}-pipeline
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref DataBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: '1'
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Repo: !Ref GitHubRepo
+                Branch: !Ref GitHubBranch
+                OAuthToken: !Ref GitHubToken
+              OutputArtifacts:
+                - Name: SourceCode
+        
+        - Name: Preprocess
+          Actions:
+            - Name: Preprocess
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref PreprocessProject
+              InputArtifacts:
+                - Name: SourceCode
+              OutputArtifacts:
+                - Name: PreprocessedData
+        
+        - Name: Train
+          Actions:
+            - Name: Train
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref TrainProject
+              InputArtifacts:
+                - Name: SourceCode
+              OutputArtifacts:
+                - Name: TrainedModel
+        
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref DeployProject
+              InputArtifacts:
+                - Name: SourceCode
+                - Name: TrainedModel
+
+Outputs:
+  DataBucketName:
+    Description: S3 bucket for data storage
+    Value: !Ref DataBucket
+  
+  ModelBucketName:
+    Description: S3 bucket for model artifacts
+    Value: !Ref ModelBucket
+  
+  PipelineName:
+    Description: Name of the MLOps pipeline
+    Value: !Ref MLOpsPipeline
+  
+  SageMakerRoleArn:
+    Description: ARN of the SageMaker execution role
+    Value: !GetAtt SageMakerExecutionRole.Arn
