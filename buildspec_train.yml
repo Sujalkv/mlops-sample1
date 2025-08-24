@@ -6,7 +6,6 @@ phases:
       python: 3.8
     commands:
       - pip install pandas scikit-learn boto3 sagemaker
-      - apt-get update && apt-get install -y jq bc  # Install jq and bc
   
   pre_build:
     commands:
@@ -23,37 +22,37 @@ phases:
       - aws s3 cp /tmp/model/evaluation.json s3://${MODEL_BUCKET}/evaluation/evaluation.json
   
   post_build:
-  commands:
-    - echo "Training completed on `date`"
-    - |
-      # Use Python to check metrics instead of jq and bc
-      python -c '
-import json
-import os
-import sys
+    commands:
+      - echo "Training completed on `date`"
+      - |
+        # Use Python to check metrics instead of jq and bc
+        python -c '
+        import json
+        import os
+        import sys
+        
+        metrics_file = "/tmp/model/metrics.json"
+        if os.path.exists(metrics_file):
+            print("Metrics file found")
+            with open(metrics_file, "r") as f:
+                try:
+                    metrics = json.load(f)
+                    accuracy = metrics.get("accuracy", 0)
+                    print(f"Extracted accuracy: {accuracy}")
+                    if accuracy > 0.8:
+                        print("Model accuracy meets threshold, proceeding with registration")
+                        os.system("aws sagemaker create-model-package-group --model-package-group-name my-model-package-group --model-package-group-description \"My model package group\" || true")
+                    else:
+                        print("Model accuracy below threshold, but continuing pipeline")
+                except json.JSONDecodeError:
+                    print("Error parsing metrics.json")
+                    print(open(metrics_file).read())
+        else:
+            print("Metrics file not found at /tmp/model/metrics.json")
+            os.system("ls -la /tmp/model/")
+        '
+      - exit 0
 
-metrics_file = "/tmp/model/metrics.json"
-if os.path.exists(metrics_file):
-    print("Metrics file found")
-    with open(metrics_file, "r") as f:
-        try:
-            metrics = json.load(f)
-            accuracy = metrics.get("accuracy", 0)
-            print(f"Extracted accuracy: {accuracy}")
-            if accuracy > 0.8:
-                print("Model accuracy meets threshold, proceeding with registration")
-                os.system("aws sagemaker create-model-package-group --model-package-group-name my-model-package-group --model-package-group-description \"My model package group\" || true")
-            else:
-                print("Model accuracy below threshold, but continuing pipeline")
-        except json.JSONDecodeError:
-            print("Error parsing metrics.json")
-            print(open(metrics_file).read())
-else:
-    print("Metrics file not found at /tmp/model/metrics.json")
-    os.system("ls -la /tmp/model/")
-      '
-    - exit 0
-    
 artifacts:
   files:
     - model/**/*
